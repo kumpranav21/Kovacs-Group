@@ -1,21 +1,33 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { View, Text, TextInput, Button, StyleSheet, ScrollView, Image, Alert, TouchableOpacity, SafeAreaView, StatusBar } from 'react-native';
-import { initializeApp, firebase } from '@firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, initializeAuth, signOut, setPersistence, browserLocalPersistence, getReactNativePersistence } from '@firebase/auth';
+import {
+  View, Text, TextInput, Button, StyleSheet,
+  ScrollView, Image, Alert, Modal, TouchableOpacity,
+  SafeAreaView, StatusBar, FlatList
+} from 'react-native';
+import firebase from 'firebase/compat/app';
+import 'firebase/compat/firestore';
+import {
+  getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  onAuthStateChanged, initializeAuth, signOut, setPersistence, browserLocalPersistence,
+  getReactNativePersistence
+} from '@firebase/auth';
+import 'react-native-gesture-handler';
+
+import { NavigationContainer } from '@react-navigation/native';
+import { createStackNavigator } from '@react-navigation/stack';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, doc, setDoc, serverTimestamp, getDocs, collection, query, where } from 'firebase/firestore';
 import { Dimensions } from 'react-native';
 import LottieView from 'lottie-react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import AppLoader from './AppLoader';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { CameraView, Camera } from "expo-camera";
-// import {BarCodeScanner} from 'expo-barcode-scanner';
-import { BarCodeScanner, Permissions } from 'expo-camera';
 import * as Font from 'expo-font';
 const { width, height } = Dimensions.get('window');
 import SplashScreen from './SplashScreen';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-const Stack = createNativeStackNavigator();
 const scaleFactor = Math.min(width / 320, height / 640); // Adjust 320 according to your base width
 const loadFonts = async () => {
   await Font.loadAsync({
@@ -33,9 +45,12 @@ const firebaseConfig = {
   appId: "1:1086567994893:web:34da273d04a93a1e6d6744",
   measurementId: "G-WLCW3R7631"
 };
-// Initialize Firebase app
+
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
+// Initialize Firestore
+const db = getFirestore(app);
 // Initialize Firebase Auth with persistence
 const auth = initializeAuth(app, {
   persistence: getReactNativePersistence(AsyncStorage)
@@ -77,30 +92,23 @@ const AuthScreen = ({ email, setEmail, password, setPassword, isLogin, setIsLogi
   );
 };
 
-const AuthenticatedScreen = ({ user, handleAuthentication }) => {
-  return (
-    <View style={styles.authContainer}>
-      <Text style={styles.title}>Welcome</Text>
-      <Text style={styles.emailText}>{user.email}</Text>
-      <Button title="Logout" onPress={handleAuthentication} color="#B90000" />
-    </View>
-  );
-};
-
 const DashboardApp = ({ handleAuthentication }) => {
+
+
   useEffect(() => {
     loadFonts();
   }, []);
   const [activeSection, setActiveSection] = useState('Home');
 
+
   const renderSection = () => {
     switch (activeSection) {
       case 'Pickup':
         return <PickupSection />;
-      case 'Messages':
-        return <MessagesSection />;
-      case 'Tasks':
-        return <TasksSection />;
+      case 'View-Pickup':
+        return <ViewPickupSection />;
+      case 'Register':
+        return <RegisterSection />;
       case 'Calendar':
         return <CalendarSection />;
       default:
@@ -139,12 +147,12 @@ const DashboardApp = ({ handleAuthentication }) => {
         <PressableFeatureBox name="View Pickup"
           icon="eye-outline" onPress=
           {
-            () => setActiveSection('Messages')
+            () => setActiveSection('View-Pickup')
           } />
         <PressableFeatureBox name="Register"
           icon="person-add-outline" onPress=
           {
-            () => setActiveSection('Tasks')
+            () => setActiveSection('Register')
           } />
         <PressableFeatureBox name="Extras"
           icon="people-outline" onPress=
@@ -155,6 +163,7 @@ const DashboardApp = ({ handleAuthentication }) => {
           icon="options-outline" onPress=
           {
             () => setActiveSection('Calendar')
+
           } />
         <PressableFeatureBox name="Reset"
           icon="refresh-outline" onPress=
@@ -166,6 +175,29 @@ const DashboardApp = ({ handleAuthentication }) => {
     </SafeAreaView>
   );
 
+  const citySection = () => (
+  <SafeAreaView style={styles.container}>
+    <StatusBar barStyle="light-content" backgroundColor="#b90000" />
+    <View style={styles.headerContainer}>
+      <Text style={styles.headerTitle}>
+       Choose your location
+      </Text>
+    </View>
+    <View style={styles.featuresContainer}>
+      <PressableFeatureBox name="Pickup"
+        icon="bus-outline" onPress=
+        {
+          () => setActiveSection('Pickup')
+        } />
+      <PressableFeatureBox name="View Pickup"
+        icon="eye-outline" onPress=
+        {
+          () => setActiveSection('View-Pickup')
+        } />
+     
+    </View>
+  
+  </SafeAreaView>);
 
   const PressableFeatureBox = (
     { name, icon,
@@ -186,13 +218,18 @@ const DashboardApp = ({ handleAuthentication }) => {
     const [hasPermission, setHasPermission] = useState(null);
     const [scanned, setScanned] = useState(false);
     const [text, setText] = useState('Not yet Scanned');
-    const employeeIDRef = useRef('');
-    const [reloadKey, setReloadKey] = useState(0);
+    const [lastText, setLastText] = useState('');
+    const [alertVisible, setAlertVisible] = useState(false);
+    const [modalVisible, setModalVisible] = useState(false);
+    const [empNotFound, setEmployeeNotFound] = useState(false);
+    const scannedRef = useRef(false);
+    const lastAlertTimeRef = useRef(0);
+    const [lastAlertTime, setLastAlertTime] = useState(0);
+
     useEffect(() => {
       const getCameraPermissions = async () => {
         const { status } = await Camera.requestCameraPermissionsAsync();
         setHasPermission(status === "granted");
-        setReloadKey((prevKey) => prevKey + 1); 
       };
 
       if (hasPermission === null) {
@@ -200,16 +237,146 @@ const DashboardApp = ({ handleAuthentication }) => {
       }
     }, [hasPermission])
 
+    const pushQR = async () => {
+      try {
+        // Fetch the employee document by ID
+        const employeeDocRef = collection(db, 'Employees');
+        const q = query(employeeDocRef, where("ID", "==", "" + text));
+        const querySnapshot = await getDocs(q);
+        let employeeName = "";
 
-    // What happens when barcode is scanned
-    const handleBarCodeScanned = ({ type, data }) => {
-      setScanned(true);
-      setText(data);
-      employeeIDRef.current = data;
-      console.log('Type: ' + type + '\nData: ' + data);
+        // Check if any documents were found
+        if (!querySnapshot.empty) {
+
+          querySnapshot.forEach((doc) => {
+            // doc.data() is never undefined for query doc snapshots
+            employeeName = doc.data().Name;
+          });
+
+          // Push entry into ScannedBarcodes collection
+          await setDoc(doc(db, 'ScannedBarcodes', text), {
+            ID: text,
+            Name: employeeName,
+            timestamp: serverTimestamp(),
+          });
+          console.log('Document successfully written!');
+        } else {
+          // Show modal or handle case where no employee is found
+          console.error('No such document in Employees collection!');
+          // Display modal or handle UI feedback
+          // Example using a state to control modal visibility
+          setModalVisible(true); // Define state and set it to true
+          setEmployeeNotFound(true);
+        }
+      } catch (error) {
+        console.error('Error writing document: ', error);
+        // Handle error
+        // Example: set an error state and display an error message
+      }
     };
 
-    if(hasPermission === false) {
+    // useEffect(() => {
+    //   const checkScannedStatus = async () => {
+    //     if (scannedRef.current && !alertVisible) {
+    //       pushQR().then(() => {
+    //         if (!empNotFound) {
+    //           setAlertVisible(true);
+    //           Alert.alert(
+    //             `${text} - Scan Successful!`,
+    //             'Keep Scanning..',
+    //             [
+    //               {
+    //                 text: 'OK',
+    //                 onPress: () => {
+    //                   lastAlertTimeRef.current = Date.now();
+    //                   setEmployeeNotFound(false);
+    //                   scannedRef.current = false;
+    //                   setAlertVisible(false);
+    //                 },
+    //               },
+    //             ]
+    //           );
+    //         }
+    //       });
+    //     }
+    //   }
+    //   const interval = setInterval(checkScannedStatus, 1000); // Check every second
+
+    //   return () => clearInterval(interval);
+    // }, [text]);
+
+    useEffect(() => {
+      const interval = setInterval(() => {
+        if (scannedRef.current && !alertVisible) {
+          if (text != lastText) {
+            pushQR().then(() => {
+              if (!empNotFound) {
+                setAlertVisible(true);
+                setLastText(text);
+                Alert.alert(
+                  `${text} - Scan Successful!`,
+                  'Keep Scanning..',
+                  [
+                    {
+                      text: 'OK',
+                      onPress: () => {
+                        lastAlertTimeRef.current = Date.now();
+                        setEmployeeNotFound(false);
+                        scannedRef.current = false;
+                        setAlertVisible(false);
+                      },
+                    },
+                  ]
+                );
+              }
+            });
+          } else if (text == lastText && Date.now() - lastAlertTimeRef.current > 2000) {
+            if (!empNotFound) {
+              setAlertVisible(true);
+              Alert.alert(
+                `${text} - Scan Successful!`,
+                'ID already Scanned, Keep Scanning..',
+                [
+                  {
+                    text: 'OK',
+                    onPress: () => {
+                      lastAlertTimeRef.current = Date.now();
+                      setEmployeeNotFound(false);
+                      scannedRef.current = false;
+                      setAlertVisible(false);
+                    },
+                  },
+                ]
+              );
+            }
+          }
+        }
+      }, 1000);
+
+      // Clear the interval when the component is unmounted
+      return () => clearInterval(interval);
+    }, []);
+
+
+
+    // What happens when barcode is scanned
+    const handleBarCodeScanned = ({ data }) => {
+      // const now = Date.now();
+      // const lastFiveDigits = now % 100000;
+      // console.log('time:- ' + lastFiveDigits);
+
+      setText(data);
+      scannedRef.current = true;
+
+    };
+
+    const getOnBarcodeScannedHandler = () => {
+      if (scannedRef.current) return undefined;
+      return handleBarCodeScanned;
+    };
+
+
+    if (hasPermission === false) {
       return (
         <View style={styles.container}>
           <View style={styles.messageContainer}>
@@ -232,35 +399,43 @@ const DashboardApp = ({ handleAuthentication }) => {
             </View>
             <View style={styles.cameraFrame}>
               <CameraView
-               
-                onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+
+                onBarcodeScanned={getOnBarcodeScannedHandler()}
                 barcodeScannerSettings={{
                   barcodeTypes: ["qr", "pdf417"],
                 }}
-                style={{ width: 400*scaleFactor*0.8, height: 550*scaleFactor*0.8,}}
+                style={{ width: 400 * scaleFactor * 0.8, height: 550 * scaleFactor * 0.8, }}
               />
               <LottieView
                 source={require('./assets/scan_qr_animation.json')}
                 style={styles.Scanner}
                 autoPlay loop
               />
-  
-              {scanned &&
-                (Alert.alert(
-                  text+' - Scan Successful!' ,
-                  'Keep Scanning..',
-                  [
-                    {
-                      text: 'OK',
-                      onPress: () => setScanned(false),
-                    },
-                  ]
-                )) 
-              }
+
 
               <Text style={styles.scanHintText}>
                 Cannot Scan QR Code? click here..
               </Text>
+              <Modal
+                animationType="slide"
+                transparent={true}
+                visible={modalVisible}
+                onRequestClose={() => {
+                  setModalVisible(false);
+                }}
+              >
+                <View style={styles.centeredView}>
+                  <View style={styles.modalView}>
+                    <Text style={styles.modalText}>No Employee Found!</Text>
+                    <TouchableOpacity
+                      style={[styles.button, styles.buttonClose]}
+                      onPress={() => setModalVisible(false)}
+                    >
+                      <Text style={styles.textStyle}>OK</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </Modal>
             </View>
           </>
         )}
@@ -268,44 +443,180 @@ const DashboardApp = ({ handleAuthentication }) => {
     );
   };
 
-  const MessagesSection = () => (
-    <View style={styles.container}>
-      <View style={styles.headerContainer}>
-        {renderBackButton()}
-        <Text style={styles.headerTitle}>
-          Messages Section
-        </Text>
-      </View>
-      <View style={styles.contentContainer}>
-        <Text style={styles.contentText}>
-          Messages Content Goes Here
-        </Text>
+  const ViewPickupSection = () => {
+    const [pickUpdata, setpickUpData] = useState([]);
 
-      </View>
-    </View>
-  );
+    const fetchPickUPData = async () => {
+      try {
+        const querySnapshot = await getDocs(collection(db, 'ScannedBarcodes'));
+        const fetchedData = querySnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setpickUpData(fetchedData);
+      } catch (error) {
+        console.error('Error fetching ScannedBarcodes documents: ', error);
+      }
+    };
 
-  const TasksSection = () => (
-    <View style={styles.container}>
-      <View style={styles.headerContainer}>
-        {renderBackButton()}
-        <Text style={styles.headerTitle}>
-          Tasks Section
-        </Text>
+
+
+    useEffect(() => {
+      fetchPickUPData();
+    }, []);
+
+
+    return (
+      <SafeAreaView style={{ flex: 1 }}>
+        <View style={styles.container}>
+          <StatusBar barStyle="dark-content" backgroundColor="black" />
+          <View style={styles.header}>
+            {renderBackButton()}
+            <Text style={styles.headerText}>View Pickup</Text>
+          </View>
+
+          <ScrollView>
+            {pickUpdata.map((item) => (
+              <View key={item.id} style={styles.item}>
+                <Text style={{ color: 'black', fontSize: 13, fontWeight: 'bold' }}>ID: {item.ID}</Text>
+                <Text style={{ color: 'black', fontSize: 13, fontWeight: 'bold' }}>Name: {item.Name}</Text>
+                <Text style={{ color: 'black', fontSize: 13, fontWeight: 'bold' }}>Time: {new Date(item.timestamp?.seconds * 1000).toLocaleString()}</Text>
+              </View>
+            ))}
+          </ScrollView>
+
+        </View>
+      </SafeAreaView>
+    )
+
+  };
+
+  const RegisterSection = () => {
+    const [hasPermission, setHasPermission] = useState(null);
+    const [scanned, setScanned] = useState(false);
+    const [text, setText] = useState('Not yet Scanned');
+    const [alertVisible, setAlertVisible] = useState(false);
+    const [modalVisible, setModalVisible] = useState(false);
+    const [name, setName] = useState('');
+    useEffect(() => {
+      const getCameraPermissions = async () => {
+        const { status } = await Camera.requestCameraPermissionsAsync();
+        setHasPermission(status === "granted");
+      };
+
+      if (hasPermission === null) {
+        getCameraPermissions();
+      }
+    }, [hasPermission])
+
+    const pushQR = async () => {
+      try {
+        await setDoc(doc(db, 'Registeration', text), {
+          barcode: text,
+          name: name,
+          timestamp: serverTimestamp(),
+        });
+      } catch (error) {
+        console.error('Error writing document: ', error);
+      }
+    };
+
+    useEffect(() => {
+      if (scanned && !alertVisible) {
+        setAlertVisible(true);
+        setModalVisible(true);
+      }
+    }, [scanned, alertVisible, text]);
+
+    // What happens when barcode is scanned
+    const handleBarCodeScanned = ({ type, data }) => {
+      setText(data);
+      setScanned(true);
+
+    };
+
+
+    const handleSubmit = () => {
+      setModalVisible(false);
+      pushQR().then(() => {
+        setScanned(false);
+        setAlertVisible(false);
+        setName(''); // Clear the name input after submission
+      });
+    };
+
+    if (hasPermission === false) {
+      return (
+        <View style={styles.container}>
+          <View style={styles.messageContainer}>
+            <Text style={styles.messageText}>Please allow access to camera</Text>
+            <Button title="Allow Camera" onPress={() => setHasPermission(null)} />
+          </View>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.cameraContainer}>
+        {hasPermission === null ? (
+          <Text>Requesting for camera permission</Text>
+        ) : (
+          <>
+            <StatusBar barStyle="dark-content" backgroundColor="black" />
+            <View style={styles.header}>
+              {renderBackButton()}
+              <Text style={styles.headerText}>Register</Text>
+            </View>
+            <View style={styles.cameraFrame}>
+              <CameraView
+                onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+                barcodeScannerSettings={{
+                  barcodeTypes: ["qr", "pdf417"],
+                }}
+                style={{ width: 400 * scaleFactor * 0.8, height: 550 * scaleFactor * 0.8, }}
+              />
+              <LottieView
+                source={require('./assets/scan_qr_animation.json')}
+                style={styles.Scanner}
+                autoPlay loop
+              />
+
+
+              <Text style={styles.scanHintText}>
+                Cannot Scan QR Code? click here..
+              </Text>
+
+            </View>
+            <Modal
+              animationType="slide"
+              transparent={true}
+              visible={modalVisible}
+              onRequestClose={() => {
+                setModalVisible(!modalVisible);
+              }}
+            >
+              <View style={styles.centeredView}>
+                <View style={styles.modalView}>
+                  <Text style={styles.modalText}>Enter employee name</Text>
+                  <TextInput
+                    style={styles.input}
+                    onChangeText={setName}
+                    value={name}
+                    placeholder="Name"
+                  />
+                  <TouchableOpacity
+                    style={[styles.button, styles.buttonClose]}
+                    onPress={handleSubmit}
+                  >
+                    <Text style={styles.textStyle}>Submit</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </Modal>
+          </>
+        )}
       </View>
-      <View style={styles.contentContainer}>
-        <Text style={styles.contentTitle}>
-          Upcoming Tasks
-        </Text>
-        <TaskItem title="Task 1"
-          description="Geekforgeeks contest." />
-        <TaskItem title="Task 2"
-          description="mock interview" />
-        <TaskItem title="Task 3"
-          description="Sample paper solution ." />
-      </View>
-    </View>
-  );
+    );
+  }
   const CalendarSection = () => (
     <View style={styles.container}>
       <View style={styles.headerContainer}>
@@ -377,6 +688,62 @@ const DashboardApp = ({ handleAuthentication }) => {
     </View>
   );
   const styles = StyleSheet.create({
+    centeredView: {
+      flex: 1,
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginTop: 22,
+    },
+    item: {
+
+      padding: 10,
+      marginVertical: 10,
+      marginHorizontal: 10,
+      backgroundColor: 'white',
+      borderRadius: 10,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.25,
+      shadowRadius: 4,
+      elevation: 5,
+    },
+    modalView: {
+      margin: 20,
+      backgroundColor: 'black',
+      borderRadius: 20,
+      padding: 35,
+      alignItems: 'center',
+      shadowColor: '#000',
+      shadowOffset: {
+        width: 0,
+        height: 2,
+      },
+      shadowOpacity: 0.25,
+      shadowRadius: 4,
+      elevation: 5,
+    },
+    buttonClose: {
+      backgroundColor: '#b90000',
+      color: 'white',
+    },
+    textStyle: {
+      color: 'white',
+      fontWeight: 'bold',
+      textAlign: 'center',
+    },
+    modalText: {
+      color: 'white',
+      marginBottom: 15,
+      textAlign: 'center',
+    },
+    input: {
+      height: 40,
+      margin: 12,
+      borderWidth: 1,
+      padding: 10,
+      width: 200,
+    },
+
     header: {
       flexDirection: 'row',
       alignContent: 'center',
@@ -388,7 +755,6 @@ const DashboardApp = ({ handleAuthentication }) => {
       color: '#fff',
       fontSize: 20,
       alignSelf: 'center',
-      justifySelf: 'center',
       fontWeight: 'bold',
     },
     cameraFrame: {
@@ -428,7 +794,8 @@ const DashboardApp = ({ handleAuthentication }) => {
     button: {
       flexDirection: 'row',
       alignItems: 'center',
-      backgroundColor: '#2ecc71',
+      backgroundColor: '#b90000',
+      color: 'white',
       padding: 10,
       borderRadius: 5,
     },
@@ -448,9 +815,9 @@ const DashboardApp = ({ handleAuthentication }) => {
       alignSelf: 'center',
     },
     Scanner: {
-      width: 400*scaleFactor*0.8,
-      height: 400*scaleFactor*0.8,
-      marginTop:40*scaleFactor*0.8,
+      width: 400 * scaleFactor * 0.8,
+      height: 400 * scaleFactor * 0.8,
+      marginTop: 40 * scaleFactor * 0.8,
       position: 'absolute',
     },
     featureBox: {
@@ -545,6 +912,21 @@ const DashboardApp = ({ handleAuthentication }) => {
     {renderSection()}
   </View>;
 };
+// const pushEmployeesToFirestore = async (employees) => {
+
+//    employees.forEach(employee => {
+//     try {
+//         setDoc(doc(db, 'Employees', employee.id), {
+//         ID: employee.id,
+//         Name: employee.name,
+//       });
+//     } catch (error) {
+//       console.error('Error writing document: ', error);
+//     }
+//   });
+
+//   console.log('All employees have been added to Firestore');
+// };
 
 export default App = () => {
 
@@ -555,38 +937,6 @@ export default App = () => {
       setIsShowSplash(false);
     }, 2500);
   });
-  //   const[hasPermission,setHasPermission] = useState(null);
-  //   const[scanned,setScanned] = useState(false);
-  //   const[text,setText] = useState('Not yet Scanned');
-
-  //   const askForCameraPermission = () =>{
-  //     (async () =>{
-  //       const {status} = await BarCodeScanner.requestPermissionsAsync();
-  //       setHasPermission(status == 'granted')
-  //     })()
-  //   }
-
-  //   //Request Camera Permission..
-  //   useEffect(() => {
-  //     askForCameraPermission();
-  //   },[]);
-
-  // //What happen when barcode scanned..
-  // const handleBarCodeScanned = ({type, data}) =>{
-  //   setScanned(true);
-  //   setText(data);
-  //   console.log('Type: '+type+"\nData: "+data);
-  // }
-
-  // if(hasPermission == false){
-  //   return(
-  //     <View style={styles.container}>
-  //       <Text> Please allow access to camera</Text>
-  //       <Button title='Allow Camera' onPress={()=> askForCameraPermission()}></Button>
-  //     </View>
-  //   )
-  // }
-
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -594,6 +944,9 @@ export default App = () => {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   const [fontsLoaded, setFontsLoaded] = useState(false);
+
+  const Stack = createStackNavigator();
+
   useEffect(() => {
     const loadAsyncData = async () => {
       try {
@@ -676,7 +1029,7 @@ export default App = () => {
         setLoading(false);
       }, 2000);
     }
-  };
+  }
 
   return (
 
@@ -698,7 +1051,8 @@ export default App = () => {
         />
         /* <DashboardApp user={user} handleAuthentication={handleAuthentication} /> */
       )}
-    </ScrollView>}</>
+    </ScrollView>}
+    </>
   );
 };
 
